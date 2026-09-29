@@ -1,0 +1,88 @@
+name: Build Android APK
+on: [push, workflow_dispatch]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Detect project type
+        id: detect
+        run: |
+          if [ -f "package.json" ] && grep -qE '"(expo|react-native)"' package.json; then
+            echo "type=rn" >> $GITHUB_OUTPUT
+            echo "🟢 React Native / Expo project detected"
+          elif [ -n "$(find . -name gradlew -not -path '*/node_modules/*' -print -quit)" ]; then
+            echo "type=native" >> $GITHUB_OUTPUT
+            echo "🟢 Native Android (Gradle) project detected"
+          else
+            echo "type=unknown" >> $GITHUB_OUTPUT
+            echo "❌ No buildable project found (need gradlew or package.json with expo/react-native)"
+            exit 1
+          fi
+
+      - name: Build React Native / Expo APK
+        if: steps.detect.outputs.type == 'rn'
+        run: |
+          echo "📦 Installing npm dependencies..."
+          npm install --legacy-peer-deps --no-audit --no-fund
+          
+          if grep -q '"expo"' package.json; then
+            echo "⚙️ Running expo prebuild..."
+            npx expo prebuild --platform android --no-install || true
+          fi
+          
+          if [ ! -d "android" ]; then
+            echo "❌ android folder not found after prebuild"
+            exit 1
+          fi
+          
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Build Native Android APK
+        if: steps.detect.outputs.type == 'native'
+        run: |
+          GRADLEW_PATH=$(find . -name "gradlew" -not -path '*/node_modules/*' | head -n 1)
+          DIR=$(dirname "$GRADLEW_PATH")
+          echo "🔧 Found gradlew in: $DIR"
+          cd "$DIR"
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: app-debug
+          path: '**/build/outputs/apk/**/*.apk'
+          if-no-files-found: warn
+
+      - name: Create Release and Upload APK
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: 'APK Build #${{ github.run_number }}'
+          files: '**/build/outputs/apk/**/*.apk'
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
